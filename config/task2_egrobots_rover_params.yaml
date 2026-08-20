@@ -1,0 +1,11 @@
+obstacle_avoider_node:
+  ros__parameters:
+    safe_distance: 4.0
+    clear_distance: 5.0
+    linear_speed: 1.0
+    angular_speed: 0.9
+    cone_angle_deg: 180.0
+    goal_x: 10.0
+    goal_y: 0.0
+    goal_tolerance: 0.15
+    heading_kp: 1.5
