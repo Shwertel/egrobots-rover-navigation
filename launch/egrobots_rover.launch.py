@@ -23,10 +23,12 @@ def generate_launch_description():
     )
 
     gazebo_pkg = get_package_share_directory('gazebo_ros')
+    world_path = os.path.join(pkg_share, 'worlds', 'egrobots_world.world')
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(gazebo_pkg, 'launch', 'gazebo.launch.py')
-        )
+        ),
+        launch_arguments={'world': world_path}.items()
     )
 
     spawn_entity = Node(
