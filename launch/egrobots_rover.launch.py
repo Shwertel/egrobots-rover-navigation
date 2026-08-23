@@ -1,16 +1,33 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import Command
+from launch.substitutions import Command, LaunchConfiguration
 
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('obstacle_avoider')
     xacro_path = os.path.join(pkg_share, 'urdf', 'egrobots_rover.urdf.xacro')
     params_file = os.path.join(pkg_share, 'config', 'task2_egrobots_rover_params.yaml')
+    rviz_config = os.path.join(pkg_share, 'rviz', 'egrobots_rover.rviz')
+
+    use_rviz = LaunchConfiguration('rviz')
+    declare_rviz = DeclareLaunchArgument(
+        'rviz', default_value='true',
+        description='Launch RViz2 with the coordinate-frame visualisation config'
+    )
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config],
+        condition=IfCondition(use_rviz),
+        output='screen'
+    )
 
     robot_description = Command(['xacro ', xacro_path])
 
@@ -63,10 +80,12 @@ def generate_launch_description():
         ]
     )
     return LaunchDescription([
+        declare_rviz,
         gazebo_launch,
         robot_state_publisher,
         spawn_entity,
         joint_state_broadcaster_spawner,
         diff_drive_spawner,
         obstacle_avoider_node,
+        rviz_node,
     ])

@@ -1,42 +1,72 @@
 import math
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped, PointStamped, TransformStamped, Point
+from visualization_msgs.msg import Marker
 from std_srvs.srv import Trigger
+from tf2_ros import (Buffer, TransformListener, TransformBroadcaster,
+                     LookupException, ExtrapolationException, ConnectivityException)
+from tf2_geometry_msgs import do_transform_point
+
+TF_ERRORS = (LookupException, ExtrapolationException, ConnectivityException)
 
 
 class ObstacleAvoider(Node):
+    """Obstacle avoidance plus a position-driven geofence, with the robot's
+    location and its sensor readings both resolved through TF2.
+
+    Frames involved:
+        odom          - fixed reference frame, published by diff_drive_controller
+        base_link     - the robot body
+        mast          - fixed to base_link
+        sensor_mount  - fixed to mast; the LiDAR reports its ranges in this frame
+
+    Nothing here hard-codes a position: the robot's pose comes from the
+    odom -> base_link transform, and obstacle detections are converted from
+    sensor_mount into odom using the transform between those two frames.
+    """
+
     def __init__(self):
         super().__init__('obstacle_avoider_node')
 
-        # Obstacle avoidance parameters
         self.declare_parameter('safe_distance', 0.5)
         self.declare_parameter('clear_distance', 0.7)
         self.declare_parameter('linear_speed', 0.2)
         self.declare_parameter('angular_speed', 0.5)
         self.declare_parameter('cone_angle_deg', 30.0)
-
-        # Goal navigation parameters
-        self.declare_parameter('goal_x', 2.0)
-        self.declare_parameter('goal_y', 0.0)
-        self.declare_parameter('goal_tolerance', 0.15)
+        self.declare_parameter('clearing_distance', 2.0)
+        self.declare_parameter('direction_scan_deg', 90.0)
+        self.declare_parameter('max_distance_from_origin', 5.0)
+        self.declare_parameter('boundary_return_ratio', 0.9)
         self.declare_parameter('heading_kp', 1.5)
+        self.declare_parameter('reference_frame', 'odom')
+        self.declare_parameter('robot_frame', 'base_link')
 
         self.enabled = False
-        self.avoiding = False
+        self.state = 'CRUISING'
         self.turn_direction = 1.0
-        self.goal_reached = False
+        self.returning = False
+        self.clear_start_x = 0.0
+        self.clear_start_y = 0.0
 
         self.current_x = 0.0
         self.current_y = 0.0
         self.current_yaw = 0.0
-        self.have_odom = False
+        self.have_pose = False
 
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.pose_publisher = self.create_publisher(PoseStamped, '/robot_pose', 10)
+        self.obstacle_publisher = self.create_publisher(PointStamped, '/detected_obstacle', 10)
+        self.marker_publisher = self.create_publisher(Marker, '/geofence_marker', 10)
         self.scan_subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.odom_subscription = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.pose_timer = self.create_timer(0.1, self.update_pose_from_tf)
+        self.marker_timer = self.create_timer(1.0, self.publish_geofence_marker)
 
         self.start_service = self.create_service(Trigger, 'start_avoidance', self.start_callback)
         self.stop_service = self.create_service(Trigger, 'stop_avoidance', self.stop_callback)
@@ -45,8 +75,8 @@ class ObstacleAvoider(Node):
 
     def start_callback(self, request, response):
         self.enabled = True
-        self.avoiding = False
-        self.goal_reached = False
+        self.state = 'CRUISING'
+        self.returning = False
         response.success = True
         response.message = 'Started'
         return response
@@ -58,17 +88,122 @@ class ObstacleAvoider(Node):
         response.message = 'Stopped'
         return response
 
-    def odom_callback(self, msg):
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
+    def update_pose_from_tf(self):
+        """R2: obtain the robot's pose from the odom -> base_link transform."""
+        reference_frame = self.get_parameter('reference_frame').value
+        robot_frame = self.get_parameter('robot_frame').value
+
+        try:
+            transform = self.tf_buffer.lookup_transform(reference_frame, robot_frame, Time())
+        except TF_ERRORS as ex:
+            self.get_logger().warn(f'TF lookup failed: {ex}', throttle_duration_sec=2.0)
+            return
+
+        t = transform.transform.translation
+        q = transform.transform.rotation
+
+        self.current_x = t.x
+        self.current_y = t.y
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
-        self.have_odom = True
+        self.have_pose = True
+
+        # R3: expose the current position on a topic.
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.header.frame_id = reference_frame
+        pose_msg.pose.position.x = self.current_x
+        pose_msg.pose.position.y = self.current_y
+        pose_msg.pose.orientation = q
+        self.pose_publisher.publish(pose_msg)
+
+    def report_obstacle_in_reference_frame(self, msg, index):
+        """R1: take a LiDAR return, which the sensor reports in its own frame,
+        and express it in the fixed reference frame.
+
+        The range/bearing pair is first turned into a point in the scan's frame
+        (sensor_mount), then run through the sensor_mount -> odom transform. The
+        same obstacle therefore gets a stable world position regardless of where
+        the robot was standing when it saw it."""
+        reference_frame = self.get_parameter('reference_frame').value
+        sensor_frame = msg.header.frame_id
+        distance = msg.ranges[index]
+        if not math.isfinite(distance):
+            return
+
+        bearing = msg.angle_min + index * msg.angle_increment
+
+        point_in_sensor = PointStamped()
+        point_in_sensor.header.frame_id = sensor_frame
+        point_in_sensor.point.x = distance * math.cos(bearing)
+        point_in_sensor.point.y = distance * math.sin(bearing)
+        point_in_sensor.point.z = 0.0
+
+        try:
+            transform = self.tf_buffer.lookup_transform(reference_frame, sensor_frame, Time())
+        except TF_ERRORS as ex:
+            self.get_logger().warn(f'Obstacle TF lookup failed: {ex}', throttle_duration_sec=2.0)
+            return
+
+        point_in_reference = do_transform_point(point_in_sensor, transform)
+        point_in_reference.header.stamp = self.get_clock().now().to_msg()
+        self.obstacle_publisher.publish(point_in_reference)
+
+        # Publish the same detection as a frame, so the transform chain
+        # sensor_mount -> odom -> detected_obstacle is visible in RViz/view_frames.
+        detection = TransformStamped()
+        detection.header.stamp = self.get_clock().now().to_msg()
+        detection.header.frame_id = reference_frame
+        detection.child_frame_id = 'detected_obstacle'
+        detection.transform.translation.x = point_in_reference.point.x
+        detection.transform.translation.y = point_in_reference.point.y
+        detection.transform.translation.z = point_in_reference.point.z
+        detection.transform.rotation.w = 1.0
+        self.tf_broadcaster.sendTransform(detection)
+
+    def publish_geofence_marker(self):
+        """Draw the boundary in the reference frame so R4's behaviour is visible."""
+        radius = self.get_parameter('max_distance_from_origin').value
+        marker = Marker()
+        marker.header.frame_id = self.get_parameter('reference_frame').value
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'geofence'
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.05
+        marker.color.r = 1.0
+        marker.color.g = 0.6
+        marker.color.a = 1.0
+        marker.pose.orientation.w = 1.0
+        for i in range(73):
+            angle = 2.0 * math.pi * i / 72.0
+            marker.points.append(Point(x=radius * math.cos(angle),
+                                       y=radius * math.sin(angle), z=0.05))
+        self.marker_publisher.publish(marker)
+
+    def choose_turn_direction(self, msg, center_index, scan_deg):
+        """Pick the side with more open space, measured over a window wider than
+        the detection cone. A dead-centred obstacle ties on the cone minimum
+        alone, which would otherwise always default to the same side."""
+        half = int(math.radians(scan_deg) / msg.angle_increment)
+        n = len(msg.ranges)
+        cap = lambda vals: [min(r, msg.range_max) for r in vals if r > 0.0]
+        left = cap(msg.ranges[center_index:min(n, center_index + half)])
+        right = cap(msg.ranges[max(0, center_index - half):center_index])
+
+        left_min = min(left) if left else msg.range_max
+        right_min = min(right) if right else msg.range_max
+        if abs(left_min - right_min) > 0.05:
+            return 1.0 if right_min < left_min else -1.0
+
+        left_mean = sum(left) / len(left) if left else msg.range_max
+        right_mean = sum(right) / len(right) if right else msg.range_max
+        return 1.0 if right_mean < left_mean else -1.0
 
     def scan_callback(self, msg):
-        if not self.enabled or not self.have_odom or self.goal_reached:
+        if not self.enabled or not self.have_pose:
             return
 
         safe_distance = self.get_parameter('safe_distance').value
@@ -76,9 +211,10 @@ class ObstacleAvoider(Node):
         linear_speed = self.get_parameter('linear_speed').value
         angular_speed = self.get_parameter('angular_speed').value
         cone_angle_deg = self.get_parameter('cone_angle_deg').value
-        goal_x = self.get_parameter('goal_x').value
-        goal_y = self.get_parameter('goal_y').value
-        goal_tolerance = self.get_parameter('goal_tolerance').value
+        clearing_distance = self.get_parameter('clearing_distance').value
+        direction_scan_deg = self.get_parameter('direction_scan_deg').value
+        max_distance = self.get_parameter('max_distance_from_origin').value
+        return_ratio = self.get_parameter('boundary_return_ratio').value
         heading_kp = self.get_parameter('heading_kp').value
 
         num_readings = len(msg.ranges)
@@ -86,67 +222,92 @@ class ObstacleAvoider(Node):
             return
 
         cone_angle_rad = math.radians(cone_angle_deg)
-        center_index = int((0.0 - msg.angle_min) / msg.angle_increment)
+        center_index = int(round((0.0 - msg.angle_min) / msg.angle_increment))
         cone_size = int(cone_angle_rad / msg.angle_increment)
 
-        left_ranges = [
-            r for r in msg.ranges[center_index:center_index + cone_size]
-            if r > 0.0
-        ]
-        right_ranges = [
-            r for r in msg.ranges[max(0, center_index - cone_size):center_index]
-            if r > 0.0
-        ]
-        all_valid = left_ranges + right_ranges
-        closest = min(all_valid) if all_valid else float('inf')
+        low = max(0, center_index - cone_size)
+        high = min(num_readings, center_index + cone_size)
+        cone_indices = [i for i in range(low, high) if msg.ranges[i] > 0.0]
+        closest_index = min(cone_indices, key=lambda i: msg.ranges[i]) if cone_indices else None
+        closest = msg.ranges[closest_index] if closest_index is not None else float('inf')
 
-        cmd = Twist()
-        # --- Priority 1: obstacle avoidance ---
-        if not self.avoiding and closest < safe_distance:
-            self.avoiding = True
-            left_min = min(left_ranges) if left_ranges else float('inf')
-            right_min = min(right_ranges) if right_ranges else float('inf')
-            self.turn_direction = 1.0 if right_min < left_min else -1.0
+        if closest_index is not None:
+            self.report_obstacle_in_reference_frame(msg, closest_index)
+
+        # R4 state update. This is evaluated on every scan, before the avoidance
+        # branches below can return early, so a boundary crossing is noticed as
+        # it happens rather than whenever avoidance next finishes.
+        distance_from_origin = math.hypot(self.current_x, self.current_y)
+        if self.returning and distance_from_origin < max_distance * return_ratio:
+            self.returning = False
             self.get_logger().info(
-                f'Obstacle at {closest:.2f} m — avoiding, '
-                f'turning {"left" if self.turn_direction > 0 else "right"}'
+                f'Back inside the boundary ({distance_from_origin:.2f} m) — resuming cruise'
+            )
+        elif not self.returning and distance_from_origin > max_distance:
+            self.returning = True
+            self.get_logger().info(
+                f'Crossed the {max_distance:.1f} m boundary at '
+                f'({self.current_x:.2f}, {self.current_y:.2f}) — heading back'
             )
 
-        if self.avoiding:
+        cmd = Twist()
+
+        # Priority 1: obstacle avoidance. Collision safety outranks the geofence,
+        # and it runs purely off the LiDAR, so it does not depend on odometry.
+        if self.state == 'CRUISING' and closest < safe_distance:
+            self.state = 'TURNING'
+            self.turn_direction = self.choose_turn_direction(msg, center_index, direction_scan_deg)
+            self.get_logger().info(
+                f'Obstacle at {closest:.2f} m — turning '
+                f'{"left" if self.turn_direction > 0 else "right"}'
+            )
+
+        if self.state == 'TURNING':
             if closest > clear_distance:
-                self.avoiding = False
-                self.get_logger().info(f'Path clear ({closest:.2f} m) — resuming navigation')
+                self.state = 'CLEARING'
+                self.clear_start_x = self.current_x
+                self.clear_start_y = self.current_y
+                self.get_logger().info(
+                    f'Path clear ({closest:.2f} m) — driving {clearing_distance:.2f} m to get past it'
+                )
             else:
                 cmd.linear.x = 0.0
                 cmd.angular.z = self.turn_direction * angular_speed
                 self.publisher.publish(cmd)
                 return
 
-        # --- Priority 2: goal navigation (only runs when not avoiding) ---
-        dx = goal_x - self.current_x
-        dy = goal_y - self.current_y
-        distance_to_goal = math.hypot(dx, dy)
+        if self.state == 'CLEARING':
+            if closest < safe_distance:
+                self.state = 'TURNING'
+                self.get_logger().info(f'Blocked again at {closest:.2f} m — turning further')
+                cmd.linear.x = 0.0
+                cmd.angular.z = self.turn_direction * angular_speed
+                self.publisher.publish(cmd)
+                return
 
-        if distance_to_goal < goal_tolerance:
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.goal_reached = True
-            self.get_logger().info(f'Goal reached at ({self.current_x:.2f}, {self.current_y:.2f})')
-        else:
-            desired_heading = math.atan2(dy, dx)
-            heading_error = desired_heading - self.current_yaw
+            travelled = math.hypot(self.current_x - self.clear_start_x,
+                                   self.current_y - self.clear_start_y)
+            if travelled < clearing_distance:
+                cmd.linear.x = linear_speed
+                cmd.angular.z = 0.0
+                self.publisher.publish(cmd)
+                return
+
+            self.state = 'CRUISING'
+            self.get_logger().info('Past the obstacle — resuming cruise')
+
+        # Priority 2 (R4): the position-driven behaviour. How far the robot is
+        # from the reference frame's origin decides whether it may keep going.
+        if self.returning:
+            heading_to_origin = math.atan2(-self.current_y, -self.current_x)
+            heading_error = heading_to_origin - self.current_yaw
             heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
-
-            angular_cmd = heading_kp * heading_error
-            angular_cmd = max(-angular_speed, min(angular_speed, angular_cmd))
-
+            angular_cmd = max(-angular_speed, min(angular_speed, heading_kp * heading_error))
             cmd.angular.z = angular_cmd
             cmd.linear.x = linear_speed * max(0.0, math.cos(heading_error))
-
-            self.get_logger().info(
-                f'Heading to goal: dist={distance_to_goal:.2f} m, '
-                f'heading_err={math.degrees(heading_error):.1f} deg'
-            )
+        else:
+            cmd.linear.x = linear_speed
+            cmd.angular.z = 0.0
 
         self.publisher.publish(cmd)
 

@@ -187,23 +187,23 @@
 
   <gazebo reference="wheel_front_left">
     <material>Gazebo/Black</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.6</mu1>
+    <mu2>0.6</mu2>
   </gazebo>
   <gazebo reference="wheel_front_right">
     <material>Gazebo/Black</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.6</mu1>
+    <mu2>0.6</mu2>
   </gazebo>
   <gazebo reference="wheel_rear_left">
     <material>Gazebo/Black</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.6</mu1>
+    <mu2>0.6</mu2>
   </gazebo>
   <gazebo reference="wheel_rear_right">
     <material>Gazebo/Black</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.6</mu1>
+    <mu2>0.6</mu2>
   </gazebo>
 
   <gazebo reference="mast">

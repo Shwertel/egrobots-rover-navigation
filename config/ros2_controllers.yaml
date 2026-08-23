@@ -16,9 +16,29 @@ diff_drive_controller:
     wheel_separation: 0.56
     wheel_radius: 0.15
 
+    # Skid-steer must scrub its wheels sideways to turn, so the effective track
+    # is wider than the geometric one. Measured against Gazebo ground truth:
+    # a commanded 0.6 rad/s pivot reported 85 deg of odom yaw for 63 deg of real
+    # yaw (1.35x over-report). Without this, odom yaw drifts tens of degrees and
+    # goal navigation steers toward a heading the robot is not actually on.
+    wheel_separation_multiplier: 1.18
+
     publish_rate: 30.0
     odom_frame_id: odom
     base_frame_id: base_link
 
     cmd_vel_timeout: 0.5
     use_stamped_vel: false
+
+    linear:
+      x:
+        has_velocity_limits: true
+        max_velocity: 1.0
+        has_acceleration_limits: true
+        max_acceleration: 2.0
+    angular:
+      z:
+        has_velocity_limits: true
+        max_velocity: 0.9
+        has_acceleration_limits: true
+        max_acceleration: 3.0

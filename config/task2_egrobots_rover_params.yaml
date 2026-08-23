@@ -1,11 +1,19 @@
 obstacle_avoider_node:
   ros__parameters:
-    safe_distance: 4.0
-    clear_distance: 5.0
+    safe_distance: 1.2
+    clear_distance: 1.5
     linear_speed: 1.0
-    angular_speed: 0.9
-    cone_angle_deg: 180.0
-    goal_x: 10.0
-    goal_y: 0.0
-    goal_tolerance: 0.15
+    angular_speed: 0.8
+    cone_angle_deg: 30.0
+    clearing_distance: 2.0
+    direction_scan_deg: 90.0
+
+    # R4: the position-driven behaviour. Stay within this radius of the
+    # reference frame's origin; re-entry is only declared at 0.9x the radius so
+    # the robot does not chatter on the boundary line.
+    max_distance_from_origin: 5.0
+    boundary_return_ratio: 0.9
+
     heading_kp: 1.5
+    reference_frame: "odom"
+    robot_frame: "base_link"

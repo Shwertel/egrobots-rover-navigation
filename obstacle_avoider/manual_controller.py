@@ -10,8 +10,10 @@ class ManualController(Node):
     def __init__(self):
         super().__init__('manual_controller')
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.linear_speed = 0.2
-        self.angular_speed = 0.5
+        self.declare_parameter('linear_speed', 0.2)
+        self.declare_parameter('angular_speed', 0.5)
+        self.linear_speed = self.get_parameter('linear_speed').value
+        self.angular_speed = self.get_parameter('angular_speed').value
         self.get_logger().info(
             'Manual control ready. w=forward, s=backward, a=left, d=right, x=stop, q=quit'
         )
