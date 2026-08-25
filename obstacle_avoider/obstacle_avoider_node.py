@@ -38,8 +38,27 @@ class ObstacleAvoider(Node):
         self.declare_parameter('cone_angle_deg', 30.0)
         self.declare_parameter('clearing_distance', 2.0)
         self.declare_parameter('direction_scan_deg', 90.0)
+        # Which position-driven behaviour runs once the path ahead is clear:
+        #   'geofence' - stay within max_distance_from_origin of the origin
+        #   'goal'     - drive to (goal_x, goal_y) and stop
+        self.declare_parameter('behavior', 'geofence')
+
         self.declare_parameter('max_distance_from_origin', 5.0)
         self.declare_parameter('boundary_return_ratio', 0.9)
+
+        self.declare_parameter('goal_x', 2.0)
+        self.declare_parameter('goal_y', 0.0)
+        self.declare_parameter('goal_tolerance', 0.15)
+
+        # Turn in place until within this much of the target bearing, then drive.
+        # Lower values behave more like a continuous arc turn (less wheel scrub,
+        # more time spent mis-aimed); higher values turn first and drive straight.
+        self.declare_parameter('heading_tolerance_deg', 30.0)
+
+        # Start slowing this far out, so the robot can physically stop inside
+        # goal_tolerance instead of coasting past it.
+        self.declare_parameter('goal_approach_distance', 1.0)
+
         self.declare_parameter('heading_kp', 1.5)
         self.declare_parameter('reference_frame', 'odom')
         self.declare_parameter('robot_frame', 'base_link')
@@ -48,6 +67,7 @@ class ObstacleAvoider(Node):
         self.state = 'CRUISING'
         self.turn_direction = 1.0
         self.returning = False
+        self.goal_reached = False
         self.clear_start_x = 0.0
         self.clear_start_y = 0.0
 
@@ -77,6 +97,7 @@ class ObstacleAvoider(Node):
         self.enabled = True
         self.state = 'CRUISING'
         self.returning = False
+        self.goal_reached = False
         response.success = True
         response.message = 'Started'
         return response
@@ -203,9 +224,10 @@ class ObstacleAvoider(Node):
         return 1.0 if right_mean < left_mean else -1.0
 
     def scan_callback(self, msg):
-        if not self.enabled or not self.have_pose:
+        if not self.enabled or not self.have_pose or self.goal_reached:
             return
 
+        behavior = self.get_parameter('behavior').value
         safe_distance = self.get_parameter('safe_distance').value
         clear_distance = self.get_parameter('clear_distance').value
         linear_speed = self.get_parameter('linear_speed').value
@@ -237,18 +259,35 @@ class ObstacleAvoider(Node):
         # R4 state update. This is evaluated on every scan, before the avoidance
         # branches below can return early, so a boundary crossing is noticed as
         # it happens rather than whenever avoidance next finishes.
-        distance_from_origin = math.hypot(self.current_x, self.current_y)
-        if self.returning and distance_from_origin < max_distance * return_ratio:
-            self.returning = False
-            self.get_logger().info(
-                f'Back inside the boundary ({distance_from_origin:.2f} m) — resuming cruise'
-            )
-        elif not self.returning and distance_from_origin > max_distance:
-            self.returning = True
-            self.get_logger().info(
-                f'Crossed the {max_distance:.1f} m boundary at '
-                f'({self.current_x:.2f}, {self.current_y:.2f}) — heading back'
-            )
+        if behavior == 'geofence':
+            distance_from_origin = math.hypot(self.current_x, self.current_y)
+            if self.returning and distance_from_origin < max_distance * return_ratio:
+                self.returning = False
+                self.get_logger().info(
+                    f'Back inside the boundary ({distance_from_origin:.2f} m) — resuming cruise'
+                )
+            elif not self.returning and distance_from_origin > max_distance:
+                self.returning = True
+                self.get_logger().info(
+                    f'Crossed the {max_distance:.1f} m boundary at '
+                    f'({self.current_x:.2f}, {self.current_y:.2f}) — heading back'
+                )
+
+        # Arriving is checked before the avoidance states, which return early.
+        # Otherwise CLEARING would keep driving its full clearing_distance even
+        # after passing the goal, overshooting whenever a goal sits within that
+        # distance of an obstacle.
+        if behavior == 'goal':
+            distance_to_goal = math.hypot(
+                self.get_parameter('goal_x').value - self.current_x,
+                self.get_parameter('goal_y').value - self.current_y)
+            if distance_to_goal < self.get_parameter('goal_tolerance').value:
+                self.goal_reached = True
+                self.publisher.publish(Twist())
+                self.get_logger().info(
+                    f'Goal reached at ({self.current_x:.2f}, {self.current_y:.2f})'
+                )
+                return
 
         cmd = Twist()
 
@@ -273,7 +312,7 @@ class ObstacleAvoider(Node):
             else:
                 cmd.linear.x = 0.0
                 cmd.angular.z = self.turn_direction * angular_speed
-                self.publisher.publish(cmd)
+                self.publish_cmd(cmd)
                 return
 
         if self.state == 'CLEARING':
@@ -282,7 +321,7 @@ class ObstacleAvoider(Node):
                 self.get_logger().info(f'Blocked again at {closest:.2f} m — turning further')
                 cmd.linear.x = 0.0
                 cmd.angular.z = self.turn_direction * angular_speed
-                self.publisher.publish(cmd)
+                self.publish_cmd(cmd)
                 return
 
             travelled = math.hypot(self.current_x - self.clear_start_x,
@@ -290,26 +329,68 @@ class ObstacleAvoider(Node):
             if travelled < clearing_distance:
                 cmd.linear.x = linear_speed
                 cmd.angular.z = 0.0
-                self.publisher.publish(cmd)
+                self.publish_cmd(cmd)
                 return
 
             self.state = 'CRUISING'
             self.get_logger().info('Past the obstacle — resuming cruise')
 
-        # Priority 2 (R4): the position-driven behaviour. How far the robot is
-        # from the reference frame's origin decides whether it may keep going.
-        if self.returning:
-            heading_to_origin = math.atan2(-self.current_y, -self.current_x)
-            heading_error = heading_to_origin - self.current_yaw
-            heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
-            angular_cmd = max(-angular_speed, min(angular_speed, heading_kp * heading_error))
-            cmd.angular.z = angular_cmd
-            cmd.linear.x = linear_speed * max(0.0, math.cos(heading_error))
+        # Priority 2: the position-driven behaviour, selected by the 'behavior'
+        # parameter. Both steer from the pose obtained via TF2.
+        if behavior == 'goal':
+            dx = self.get_parameter('goal_x').value - self.current_x
+            dy = self.get_parameter('goal_y').value - self.current_y
+
+            heading_error = self.steer_towards(
+                cmd, math.atan2(dy, dx), linear_speed, angular_speed, heading_kp)
+
+            self.get_logger().info(
+                f'Heading to goal: dist={distance_to_goal:.2f} m, '
+                f'heading_err={math.degrees(heading_error):.0f} deg, v={cmd.linear.x:.2f}',
+                throttle_duration_sec=2.0
+            )
+        elif self.returning:
+            self.steer_towards(cmd, math.atan2(-self.current_y, -self.current_x),
+                               linear_speed, angular_speed, heading_kp)
         else:
             cmd.linear.x = linear_speed
             cmd.angular.z = 0.0
 
-        self.publisher.publish(cmd)
+        self.publish_cmd(cmd)
+
+    def publish_cmd(self, cmd):
+        """Publish a velocity command, capping forward speed near the goal.
+
+        The cap has to live here rather than in the goal-navigation branch,
+        because the avoidance states publish and return before that branch runs.
+        CLEARING in particular drives at full speed, so a goal falling inside
+        its clearing run was crossed at 1.0 m/s and overshot by the robot's
+        0.25 m stopping distance."""
+        if cmd.linear.x > 0.0 and self.get_parameter('behavior').value == 'goal':
+            distance_to_goal = math.hypot(
+                self.get_parameter('goal_x').value - self.current_x,
+                self.get_parameter('goal_y').value - self.current_y)
+            if distance_to_goal < approach_distance:
+                cmd.linear.x *= max(0.15, distance_to_goal / approach_distance)
+        self.publish_cmd(cmd)
+
+    def steer_towards(self, cmd, desired_heading, linear_speed, angular_speed, heading_kp):
+        """Proportional heading control toward a bearing in the reference frame.
+
+        Beyond heading_tolerance the robot pivots in place rather than arcing,
+        so it commits to a heading once and then drives a straight line, instead
+        of continuously hunting left and right the whole way there."""
+        tolerance = math.radians(self.get_parameter('heading_tolerance_deg').value)
+
+        heading_error = desired_heading - self.current_yaw
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+        cmd.angular.z = max(-angular_speed, min(angular_speed, heading_kp * heading_error))
+
+        if abs(heading_error) > tolerance:
+            cmd.linear.x = 0.0
+        else:
+            cmd.linear.x = linear_speed
+        return heading_error
 
 
 def main(args=None):

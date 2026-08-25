@@ -1,0 +1,26 @@
+obstacle_avoider_node:
+  ros__parameters:
+    behavior: "goal"
+
+    safe_distance: 1.2
+    clear_distance: 1.5
+    linear_speed: 1.0
+    angular_speed: 0.8
+    cone_angle_deg: 30.0
+    clearing_distance: 2.0
+    direction_scan_deg: 90.0
+
+    # Target position in the reference frame. Overridable at launch with
+    # goal_x:= / goal_y:=. Accuracy is bounded by odometry drift; see the README.
+    goal_x: 10.0
+    goal_y: 0.0
+    goal_tolerance: 0.15
+
+    # Turn in place until within this of the target bearing, then drive straight.
+    heading_tolerance_deg: 30.0
+    # Begin decelerating this far out so the robot can stop inside goal_tolerance.
+    goal_approach_distance: 1.0
+
+    heading_kp: 1.5
+    reference_frame: "odom"
+    robot_frame: "base_link"

@@ -1,5 +1,7 @@
 obstacle_avoider_node:
   ros__parameters:
+    behavior: "geofence"
+
     safe_distance: 1.2
     clear_distance: 1.5
     linear_speed: 1.0

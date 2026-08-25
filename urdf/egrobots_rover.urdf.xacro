@@ -41,7 +41,11 @@
     </collision>
     <inertial>
       <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <!-- Solid cylinder r=0.15, L=0.15, m=1.0, spinning about Y (the joint axis).
+           Axial term    m*r^2/2           = 0.01125  (iyy)
+           Transverse    m*(3r^2 + L^2)/12 = 0.0075   (ixx, izz)
+           Previously 0.01 on all three axes, which describes a sphere, not a wheel. -->
+      <inertia ixx="0.0075" ixy="0.0" ixz="0.0" iyy="0.01125" iyz="0.0" izz="0.0075"/>
     </inertial>
   </link>
 
@@ -67,7 +71,11 @@
     </collision>
     <inertial>
       <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <!-- Solid cylinder r=0.15, L=0.15, m=1.0, spinning about Y (the joint axis).
+           Axial term    m*r^2/2           = 0.01125  (iyy)
+           Transverse    m*(3r^2 + L^2)/12 = 0.0075   (ixx, izz)
+           Previously 0.01 on all three axes, which describes a sphere, not a wheel. -->
+      <inertia ixx="0.0075" ixy="0.0" ixz="0.0" iyy="0.01125" iyz="0.0" izz="0.0075"/>
     </inertial>
   </link>
 
@@ -94,7 +102,11 @@
     </collision>
     <inertial>
       <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <!-- Solid cylinder r=0.15, L=0.15, m=1.0, spinning about Y (the joint axis).
+           Axial term    m*r^2/2           = 0.01125  (iyy)
+           Transverse    m*(3r^2 + L^2)/12 = 0.0075   (ixx, izz)
+           Previously 0.01 on all three axes, which describes a sphere, not a wheel. -->
+      <inertia ixx="0.0075" ixy="0.0" ixz="0.0" iyy="0.01125" iyz="0.0" izz="0.0075"/>
     </inertial>
   </link>
 
@@ -121,7 +133,11 @@
     </collision>
     <inertial>
       <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <!-- Solid cylinder r=0.15, L=0.15, m=1.0, spinning about Y (the joint axis).
+           Axial term    m*r^2/2           = 0.01125  (iyy)
+           Transverse    m*(3r^2 + L^2)/12 = 0.0075   (ixx, izz)
+           Previously 0.01 on all three axes, which describes a sphere, not a wheel. -->
+      <inertia ixx="0.0075" ixy="0.0" ixz="0.0" iyy="0.01125" iyz="0.0" izz="0.0075"/>
     </inertial>
   </link>
 
@@ -187,23 +203,23 @@
 
   <gazebo reference="wheel_front_left">
     <material>Gazebo/Black</material>
-    <mu1>0.6</mu1>
-    <mu2>0.6</mu2>
+    <mu1>0.3</mu1>
+    <mu2>0.3</mu2>
   </gazebo>
   <gazebo reference="wheel_front_right">
     <material>Gazebo/Black</material>
-    <mu1>0.6</mu1>
-    <mu2>0.6</mu2>
+    <mu1>0.3</mu1>
+    <mu2>0.3</mu2>
   </gazebo>
   <gazebo reference="wheel_rear_left">
     <material>Gazebo/Black</material>
-    <mu1>0.6</mu1>
-    <mu2>0.6</mu2>
+    <mu1>0.3</mu1>
+    <mu2>0.3</mu2>
   </gazebo>
   <gazebo reference="wheel_rear_right">
     <material>Gazebo/Black</material>
-    <mu1>0.6</mu1>
-    <mu2>0.6</mu2>
+    <mu1>0.3</mu1>
+    <mu2>0.3</mu2>
   </gazebo>
 
   <gazebo reference="mast">

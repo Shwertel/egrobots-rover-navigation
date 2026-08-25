@@ -47,8 +47,11 @@ robot is:
 | `urdf/egrobots_rover.urdf.xacro` | The custom robot: chassis, 4 wheels, mast, sensor mount, LiDAR, and the `ros2_control` hardware interface |
 | `worlds/egrobots_world.world` | Gazebo world with raised physics solver iterations (see Section 6) |
 | `config/ros2_controllers.yaml` | `controller_manager` config: `joint_state_broadcaster` + a 4-wheel `diff_drive_controller`, with velocity/acceleration limits and skid-steer odometry calibration |
-| `config/task2_egrobots_rover_params.yaml` | Avoidance and geofence parameters tuned for this robot |
-| `launch/egrobots_rover.launch.py` | Single launch: Gazebo, robot spawn, controllers, avoidance node, and RViz2 |
+| `config/geofence_params.yaml` | Avoidance + geofence parameters (`behavior: geofence`) |
+| `config/goal_navigation_params.yaml` | Avoidance + goal-seeking parameters (`behavior: goal`) |
+| `launch/simulation.launch.py` | Shared bring-up: Gazebo, robot spawn, controllers, RViz2 — no behaviour node |
+| `launch/geofence.launch.py` | Simulation + the geofence behaviour |
+| `launch/goal_navigation.launch.py` | Simulation + goal navigation to `(goal_x, goal_y)` |
 | `rviz/egrobots_rover.rviz` | RViz2 config showing the frame tree, robot model, laser scan, geofence, and detections |
 | `obstacle_avoider/obstacle_avoider_node.py` | The single node: TF2 localization, obstacle avoidance, and the geofence behaviour |
 | `obstacle_avoider/manual_controller.py` | Keyboard teleop, for manually driving the robot |
@@ -77,13 +80,27 @@ source install/setup.bash
 ```
 
 ### Run
+
+Two behaviours, each with its own launch file. Both start Gazebo, spawn the
+rover, activate the drive controllers, start `obstacle_avoider_node`, and open
+RViz2 with the frame visualisation. Add `rviz:=false` to skip RViz.
+
+The geofence behaviour (R4 — cruise, avoid obstacles, turn back at the boundary):
 ```bash
-ros2 launch obstacle_avoider egrobots_rover.launch.py
+ros2 launch obstacle_avoider geofence.launch.py
 ```
 
-This starts Gazebo, spawns the rover, activates the drive controllers, starts
-`obstacle_avoider_node`, and opens RViz2 with the frame visualisation. Add
-`rviz:=false` to skip RViz.
+Goal navigation (Week 1's behaviour on this rover — drive to a coordinate):
+```bash
+ros2 launch obstacle_avoider goal_navigation.launch.py
+```
+The target can be overridden without editing YAML:
+```bash
+ros2 launch obstacle_avoider goal_navigation.launch.py goal_x:=5.0 goal_y:=2.0
+```
+
+Both include `simulation.launch.py`, which can also be run alone to bring up the
+robot with no behaviour attached — useful for manual driving or teleop testing.
 
 The node starts **disabled** by design. To begin:
 ```bash
@@ -156,10 +173,11 @@ via a `TransformListener`.
 
 **Services:** `/start_avoidance` and `/stop_avoidance` (`std_srvs/srv/Trigger`).
 
-**Parameters** (`config/task2_egrobots_rover_params.yaml`):
+**Parameters** (`config/geofence_params.yaml`, `config/goal_navigation_params.yaml`):
 
 | Parameter | Value | Meaning |
 |---|---|---|
+| `behavior` | `geofence` / `goal` | Which position-driven behaviour runs when the path is clear |
 | `safe_distance` | `1.2` m | Distance below which an obstacle triggers avoidance |
 | `clear_distance` | `1.5` m | Distance the path must exceed before the turn ends |
 | `linear_speed` | `1.0` m/s | Cruise speed |
@@ -167,11 +185,25 @@ via a `TransformListener`.
 | `cone_angle_deg` | `30.0` deg | Half-angle of the forward detection cone |
 | `clearing_distance` | `2.0` m | Distance driven past an obstacle before steering resumes |
 | `direction_scan_deg` | `90.0` deg | Half-angle of the window used to choose a turn side |
-| `max_distance_from_origin` | `5.0` m | R4: the geofence radius |
-| `boundary_return_ratio` | `0.9` | Re-entry declared at this fraction of the radius |
-| `heading_kp` | `1.5` | Proportional gain when steering back to the origin |
+| `heading_kp` | `1.5` | Proportional gain when steering toward a bearing |
 | `reference_frame` | `odom` | The fixed frame the robot localises against |
 | `robot_frame` | `base_link` | The robot's body frame |
+
+Geofence only:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `max_distance_from_origin` | `5.0` m | R4: the geofence radius |
+| `boundary_return_ratio` | `0.9` | Re-entry declared at this fraction of the radius |
+
+Goal navigation only:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `goal_x` / `goal_y` | `10.0` / `0.0` | Target position in the reference frame |
+| `goal_tolerance` | `0.15` m | Distance within which the goal counts as reached |
+| `heading_tolerance_deg` | `30.0` deg | Pivot in place until within this of the target bearing, then drive straight |
+| `goal_approach_distance` | `1.0` m | Begin decelerating this far out |
 
 ### Behaviour
 
@@ -183,11 +215,20 @@ Three states, evaluated every scan:
 - **CLEARING** — drive `clearing_distance` forward before any steering resumes,
   so the rover actually gets past the obstacle instead of turning back into it.
 
-The geofence is evaluated on every scan, *before* the avoidance branches can
-return early, so a boundary crossing is noticed as it happens. Obstacle
-avoidance outranks the geofence: a collision reflex must not wait on a
-position-based rule, and it runs purely off the LiDAR so it never depends on
-odometry.
+Once the path is clear, the `behavior` parameter decides what happens next —
+hold the geofence, or steer to the goal. Both steer from the pose obtained via
+TF2, and both share the same avoidance states above.
+
+The geofence and the goal-arrival check are evaluated on every scan, *before*
+the avoidance branches can return early, so neither is starved while the robot
+is avoiding something. Obstacle avoidance outranks both: a collision reflex must
+not wait on a position-based rule, and it runs purely off the LiDAR so it never
+depends on odometry.
+
+In goal mode the forward speed is capped by proximity to the goal in *every*
+state, not just while goal-seeking. `CLEARING` drives at full speed, so a goal
+falling inside its clearing run would otherwise be crossed at 1.0 m/s and
+overshot by the robot's 0.25 m stopping distance.
 
 ---
 
@@ -247,13 +288,24 @@ demonstration in the package that frames are being composed rather than merely
 read: the published point carries `z ≈ 0.475`, the sensor's height above
 `base_link`, which only appears because the transform was genuinely applied.
 
-**Goal navigation was intentionally dropped for this task.** Week 1's node drove
-to a goal coordinate. That behaviour depends on absolute position accuracy —
-precisely what wheel odometry on a skid-steer platform cannot provide (see
-Section 7). The geofence was chosen for R4 instead: it is driven by position
-relative to a fixed frame, satisfies the requirement directly, and degrades
-gracefully rather than catastrophically as odometry drifts. Week 1's
-goal-navigation version remains intact in its own repository.
+**The geofence, not goal navigation, is what this task submits for R4.** Week 1's
+node drove to a goal coordinate. That behaviour depends on absolute position
+accuracy — precisely what wheel odometry on a skid-steer platform cannot provide
+(see Section 7). The geofence is driven by position relative to a fixed frame,
+satisfies the requirement just as directly, and degrades gracefully rather than
+catastrophically as odometry drifts. Goal navigation is still available via
+`goal_navigation.launch.py`, kept as a second `behavior` mode on the same node
+rather than a forked copy, so both share one avoidance implementation.
+
+**The robot turns to face its target, then drives straight.** Beyond
+`heading_tolerance_deg` it pivots in place instead of arcing toward the bearing.
+A pivot is actually the *worst* case for wheel scrub — 58% of each wheel's motion
+is lateral sliding, against 20% for an arc at 1.0 m/s — but it minimises *total*
+rotation, and rotation is where nearly all the odometry error comes from.
+Measured on this robot: a straight 10 m run finished 0.01 m from truth, while a
+5 m run containing a single avoidance turn finished 2.3 m out. Continuous
+proportional steering was correcting the whole way and accumulating error with
+every correction.
 
 ---
 
