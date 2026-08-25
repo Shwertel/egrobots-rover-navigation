@@ -367,12 +367,13 @@ class ObstacleAvoider(Node):
         its clearing run was crossed at 1.0 m/s and overshot by the robot's
         0.25 m stopping distance."""
         if cmd.linear.x > 0.0 and self.get_parameter('behavior').value == 'goal':
+            approach_distance = self.get_parameter('goal_approach_distance').value
             distance_to_goal = math.hypot(
                 self.get_parameter('goal_x').value - self.current_x,
                 self.get_parameter('goal_y').value - self.current_y)
             if distance_to_goal < approach_distance:
                 cmd.linear.x *= max(0.15, distance_to_goal / approach_distance)
-        self.publish_cmd(cmd)
+        self.publisher.publish(cmd)
 
     def steer_towards(self, cmd, desired_heading, linear_speed, angular_speed, heading_kp):
         """Proportional heading control toward a bearing in the reference frame.

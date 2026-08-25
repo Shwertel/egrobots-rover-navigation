@@ -27,6 +27,12 @@ diff_drive_controller:
     odom_frame_id: odom
     base_frame_id: base_link
 
+    # The EKF (see config/ekf.yaml) owns the odom -> base_link transform now, so
+    # the controller must stop publishing it — two publishers of the same
+    # transform fight and produce a jittering frame tree. The controller still
+    # publishes its odometry on /diff_drive_controller/odom, which the EKF reads.
+    enable_odom_tf: false
+
     cmd_vel_timeout: 0.5
     use_stamped_vel: false
 

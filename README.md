@@ -47,6 +47,7 @@ robot is:
 | `urdf/egrobots_rover.urdf.xacro` | The custom robot: chassis, 4 wheels, mast, sensor mount, LiDAR, and the `ros2_control` hardware interface |
 | `worlds/egrobots_world.world` | Gazebo world with raised physics solver iterations (see Section 6) |
 | `config/ros2_controllers.yaml` | `controller_manager` config: `joint_state_broadcaster` + a 4-wheel `diff_drive_controller`, with velocity/acceleration limits and skid-steer odometry calibration |
+| `config/ekf.yaml` | `robot_localization` EKF: fuses wheel velocity with IMU heading and publishes `odom → base_link` |
 | `config/geofence_params.yaml` | Avoidance + geofence parameters (`behavior: geofence`) |
 | `config/goal_navigation_params.yaml` | Avoidance + goal-seeking parameters (`behavior: goal`) |
 | `launch/simulation.launch.py` | Shared bring-up: Gazebo, robot spawn, controllers, RViz2 — no behaviour node |
@@ -137,26 +138,42 @@ ros2 run obstacle_avoider manual_controller --ros-args -r /cmd_vel:=/diff_drive_
 ## 4. Coordinate Frames
 
 ```
-odom                     fixed reference frame, published by diff_drive_controller
+odom                     fixed reference frame, published by ekf_filter_node
  └── base_link           the robot body
       ├── wheel_front_left / wheel_front_right
       ├── wheel_rear_left / wheel_rear_right
+      ├── imu_link             the IMU, rigidly fixed to the chassis
       └── mast
            └── sensor_mount     the LiDAR reports its ranges in this frame
 odom
  └── detected_obstacle   published by this node, where the nearest obstacle is
 ```
 
-`odom → base_link` is published by the drive controller from wheel odometry.
-The static chain `base_link → mast → sensor_mount` and the wheel joint
-transforms come from `robot_state_publisher` and `joint_state_broadcaster`.
-`odom → detected_obstacle` is broadcast by `obstacle_avoider_node`.
+`odom → base_link` is published by **`ekf_filter_node`**, not the drive
+controller — see Section 6. The controller still publishes its wheel odometry
+on `/diff_drive_controller/odom`, but as an *input* to the filter rather than as
+the final answer, and `enable_odom_tf: false` stops it publishing the transform
+itself. Two publishers of one transform would fight.
+
+The static chain `base_link → mast → sensor_mount`, `base_link → imu_link`, and
+the wheel joint transforms come from `robot_state_publisher` and
+`joint_state_broadcaster`. `odom → detected_obstacle` is broadcast by
+`obstacle_avoider_node`.
+
+Note that `obstacle_avoider_node` was not changed when localisation moved to the
+EKF. It still asks TF2 for `odom → base_link` and is indifferent to which node
+answers — the point of routing position through the transform tree rather than
+subscribing to a particular odometry topic.
 
 ---
 
 ## 5. ROS 2 Interface
 
 ### Node: `obstacle_avoider_node`
+
+The rover also publishes `/imu/data` (`sensor_msgs/msg/Imu`, 100 Hz) from Gazebo,
+and `/diff_drive_controller/odom` from the drive controller. Both are consumed by
+`ekf_filter_node`, which publishes the fused estimate on `/odometry/filtered`.
 
 **Subscribes:** `/scan` (`sensor_msgs/msg/LaserScan`), and `/tf` + `/tf_static`
 via a `TransformListener`.
@@ -297,6 +314,27 @@ catastrophically as odometry drifts. Goal navigation is still available via
 `goal_navigation.launch.py`, kept as a second `behavior` mode on the same node
 rather than a forked copy, so both share one avoidance implementation.
 
+**Heading comes from an IMU, forward speed from the wheels, fused by an EKF.**
+Wheel odometry was measured doing one job well and one badly: forward distance
+tracked at 98–102% over a 10 m run, while rotation reported 85° for 63° of real
+turn. So `config/ekf.yaml` takes only `vx` from `/diff_drive_controller/odom` and
+only yaw and yaw rate from `/imu/data`.
+
+The wheels' yaw is deliberately *excluded* rather than merely down-weighted. A
+Kalman filter removes **noise** — random scatter that averages out — but not
+**bias**, a consistent error in one direction. Skid-steer wheel yaw is biased: it
+over-reports rotation by roughly the same factor every time, so feeding it in
+would pull the estimate steadily toward the wrong answer.
+
+This matters because heading error compounds with distance. A few degrees of
+error costs nothing standing still and metres after driving on. Measured on the
+same obstacle-avoidance run, goal (5.0, 0.0):
+
+| | Reported | Ground truth | Error |
+|---|---|---|---|
+| Wheel odometry only | (4.87, 0.08) | (7.19, 0.73) | **2.3 m** |
+| Wheels + IMU via EKF | (4.97, −0.14) | (5.07, −0.19) | **0.09 m** |
+
 **The robot turns to face its target, then drives straight.** Beyond
 `heading_tolerance_deg` it pivots in place instead of arcing toward the bearing.
 A pivot is actually the *worst* case for wheel scrub — 58% of each wheel's motion
@@ -311,26 +349,31 @@ every correction.
 
 ## 7. Known Limitations
 
-**Wheel odometry drifts, and cannot be fully fixed by calibration.** This is the
-most significant limitation and it is inherent, not a tuning oversight:
+**Position still drifts, though the IMU has reduced it by roughly 25×.** Wheel
+encoders cannot observe lateral slip — a skid-steer robot slides sideways to
+turn, and nothing in the encoder signal reflects it. Fusing IMU heading removes
+the dominant term (2.3 m → 0.09 m on the run in Section 6), but does not
+eliminate drift:
 
-- Lateral slip is invisible to wheel encoders. A skid-steer robot slides
-  sideways while turning, and the odometry has no way to observe it.
-- Dead reckoning has no absolute reference, so error accumulates without bound.
-- The slip itself is not repeatable — an identical 0.6 rad/s command produced
-  between 60° and 75° of real rotation across runs, because a rigid 4-wheel
-  chassis with no suspension is an over-constrained contact problem.
+- Dead reckoning has no absolute reference. The EKF slows accumulation; it
+  cannot bound it. Over a long enough run the error still grows without limit.
+- The slip is not repeatable — an identical 0.6 rad/s command produced between
+  60° and 75° of real rotation across runs, because a rigid 4-wheel chassis with
+  no suspension is an over-constrained contact problem.
+- **The simulated IMU is better than a real one.** Gazebo derives it from ground
+  truth plus the noise configured in the URDF. A physical IMU has gyro bias
+  drift — its zero point wanders with temperature and time, so heading rotates
+  slowly even at rest. On real hardware some of this error would return.
 
-In one logged run the node reported `Goal reached at (10.07, -0.05)` while
-Gazebo placed the robot at `(2.18, 8.04)` — an 11 m error. In ROS terms, `odom`
-is a continuous-but-drifting frame; a drift-free `map` frame is what a
-localization source would provide. This robot has none, so absolute positions
-degrade over time. Obstacle avoidance is unaffected, since it reads only the
-LiDAR.
+In ROS terms `odom` is a continuous-but-drifting frame, and a drift-free `map`
+frame is what a localization source provides. This robot has no `map` frame, so
+absolute positions still degrade over a long enough mission. Obstacle avoidance
+is unaffected either way, since it reads only the LiDAR.
 
-The proper fixes, both out of scope for this task's timeframe, are an IMU fused
-with wheel odometry (e.g. `robot_localization`'s EKF), or a ground-truth
-odometry plugin for simulation-only testing.
+The remaining fix is to use the LiDAR for localization rather than only for
+obstacle detection — scan matching against a map (`nav2_amcl`) or building one
+(`slam_toolbox`) publishes a `map → odom` correction that bounds the error
+absolutely. That is out of scope for this task.
 
 **Other limitations:**
 

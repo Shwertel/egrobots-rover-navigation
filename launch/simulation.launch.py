@@ -65,6 +65,17 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Fuses wheel odometry with the IMU and publishes odom -> base_link in place
+    # of the drive controller. Wheel encoders cannot observe the sideways scrub a
+    # skid-steer needs to turn, so heading comes from the IMU instead.
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[os.path.join(pkg_share, 'config', 'ekf.yaml')],
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -84,5 +95,6 @@ def generate_launch_description():
         spawn_entity,
         joint_state_broadcaster_spawner,
         diff_drive_spawner,
+        ekf_node,
         rviz_node,
     ])
