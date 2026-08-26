@@ -383,3 +383,9 @@ absolutely. That is out of scope for this task.
 - No path planning around obstacles, and no recovery from being fully boxed in.
 - Tested with single static obstacles in an otherwise empty world, not in
   cluttered or dynamic environments.
+
+
+
+
+https://github.com/user-attachments/assets/47cb0cc1-dc86-4bdd-a1df-0423a96fea30
+
